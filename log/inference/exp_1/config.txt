@@ -1,0 +1,9 @@
+timestamp  : 2026-03-22 17:57:43
+target     : score
+loss_fn    : ccc
+lr         : 0.001
+patience   : 20
+batch_size : 6
+max_epochs : 500
+emb_dir    : /home/hayashi0884/proj-general-est-conv/data/preprocessed
+cv_scheme  : leave-one-person-out

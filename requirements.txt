@@ -1,0 +1,10 @@
+torch
+torchaudio
+transformers
+sentence-transformers
+soundfile
+webrtcvad-wheels
+numpy
+pandas
+scipy
+matplotlib
