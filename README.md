@@ -1,41 +1,43 @@
-# 会話スコア予測パイプライン
+# Conversation Score Prediction Pipeline
 
-任意の対話音声・書き起こしテキストから、話者が会話相手に抱くスコアを予測する回帰パイプライン。
+A regression pipeline that predicts the score a speaker assigns to their conversation partner, from arbitrary dialogue audio and transcript text.
 
----
-
-## タスク定義
-
-**入力**: 1 セッション分の書き起こし CSV（発話ごとの開始・終了時刻・話者・テキスト）と対応する音声 WAV。
-
-**出力**: 注目話者が当該セッションで抱くスコアの予測値（連続値回帰）。
-
-**特徴量**:
-
-| ストリーム | モデル | 埋め込み次元 |
-|-----------|--------|-------------|
-| テキスト | sentence-transformers/sentence-t5-large | 768 (L2 正規化) |
-| 音声 | facebook/hubert-large-ll60k | 1024 (L2 正規化) |
-
-各ストリームについて、発話列を Additive Attention Pooling でセッション埋め込みに集約し、MLP ヘッドでスコアを予測する。最終予測は **Late Fusion**（テキスト予測と音声予測の単純平均）も出力する。
-
-**交差検証**: Leave-One-Session-Out (LOSO) — セッションを 1 件ずつテストに回す。スケーラは訓練セットのみで fitting し、テストセットに適用（スケール逆変換後に評価）。
+> Japanese README: [README_ja.md](README_ja.md)
 
 ---
 
-## 全体の流れ
+## Task Definition
+
+**Input**: A transcript CSV for one session (utterance-level start/end times, speaker, text) and the corresponding audio WAV.
+
+**Output**: Predicted score (continuous regression) that the target speaker assigns in the session.
+
+**Features**:
+
+| Stream | Model | Embedding dim |
+|--------|-------|---------------|
+| Text   | sentence-transformers/sentence-t5-large | 768 (L2-normalized) |
+| Audio  | facebook/hubert-large-ll60k | 1024 (L2-normalized) |
+
+For each stream, the utterance sequence is aggregated into a session embedding via Additive Attention Pooling, then an MLP head predicts the score. The final output also includes **Late Fusion** (simple average of text and audio predictions).
+
+**Cross-validation**: Leave-One-Session-Out (LOSO) — each session is used as the test set once. The scaler is fit on the training set only and applied to the test set (metrics are computed after inverse-transforming predictions).
+
+---
+
+## Pipeline Overview
 
 ```
-[音声 WAV / 書き起こし CSV / スコア CSV]
+[Audio WAV / Transcript CSV / Score CSV]
         ↓  Step 2
-[特徴量抽出]  →  data/preprocessed/{session_ID}.pt
+[Feature Extraction]  →  data/preprocessed/{session_ID}.pt
         ↓  Step 3
-[モデル学習・評価 (LOSO CV)]  →  log/inference/exp_{n}/
+[Model Training & Evaluation (LOSO CV)]  →  log/inference/exp_{n}/
 ```
 
 ---
 
-## Step 1: 環境構築
+## Step 1: Environment Setup
 
 ```bash
 pip install -r requirements.txt
@@ -43,9 +45,9 @@ pip install -r requirements.txt
 
 ---
 
-## Step 2: 特徴量抽出
+## Step 2: Feature Extraction
 
-書き起こし CSV と音声 WAV からテキスト・音声埋め込みを抽出し、`.pt` ファイルとして保存する。
+Extracts text and audio embeddings from transcript CSVs and audio WAVs, and saves them as `.pt` files.
 
 ```bash
 python src/preprocessing.py feature_extraction \
@@ -55,99 +57,99 @@ python src/preprocessing.py feature_extraction \
   --audio-dir      data/audio
 ```
 
-### 入力
+### Input
 
-**`data/pairs.csv`** — 1 行が 1 サンプル（話者×セッション）に対応する。
+**`data/pairs.csv`** — each row represents one sample (speaker × session).
 
-| 列名 | 必須 | 説明 |
-|------|:----:|------|
-| `speaker_id` | ○ | 注目話者の ID |
-| `partner_id` | ○ | 会話相手の ID |
-| `score` | ○ | 予測対象スコア |
-| `session_ID` | | 出力ファイルのステム（省略時: `{speaker_id}__{partner_id}`） |
-| `speaker_label` | | 書き起こし CSV の `speaker` 列で注目話者を示す値（省略時: `speaker_id`） |
-| `transcript_path` | | 書き起こし CSV のパス（省略時: `{transcript_dir}/{speaker_id}__{partner_id}.csv`） |
-| `wav_path` | | WAV ファイルのパス（省略時: `{audio_dir}/{speaker_id}__{partner_id}.wav`） |
+| Column | Required | Description |
+|--------|:--------:|-------------|
+| `speaker_id` | yes | ID of the target speaker |
+| `partner_id` | yes | ID of the conversation partner |
+| `score` | yes | Target score to predict |
+| `session_ID` | | Output file stem (default: `{speaker_id}__{partner_id}`) |
+| `speaker_label` | | Value in the transcript CSV `speaker` column that identifies the target speaker (default: `speaker_id`) |
+| `transcript_path` | | Path to the transcript CSV (default: `{transcript_dir}/{speaker_id}__{partner_id}.csv`) |
+| `wav_path` | | Path to the WAV file (default: `{audio_dir}/{speaker_id}__{partner_id}.wav`) |
 
-**書き起こし CSV** — 列: `start`（秒）, `end`（秒）, `speaker`, `text`
+**Transcript CSV** — columns: `start` (sec), `end` (sec), `speaker`, `text`
 
-### 処理ステップ（サンプルごと）
+### Processing Steps (per sample)
 
-0. 連続同一話者発話のマージ
-1. タイムスタンプによる音声セグメント抽出
-2. VAD トリミング（webrtcvad、30 ms フレーム、300 ms パディング）
-3. テキスト埋め込み抽出 → `[n_utts, 768]`（L2 正規化）
-4. 音声埋め込み抽出 → `[n_utts, 1024]`（L2 正規化）
-5. `.pt` ファイル保存
+0. Merge consecutive utterances by the same speaker
+1. Extract audio segments by timestamp
+2. VAD trimming (webrtcvad, 30 ms frames, 300 ms padding)
+3. Extract text embeddings → `[n_utts, 768]` (L2-normalized)
+4. Extract audio embeddings → `[n_utts, 1024]` (L2-normalized)
+5. Save as `.pt` file
 
-### 出力
+### Output
 
-`data/preprocessed/{session_ID}.pt` に以下を格納:
+`data/preprocessed/{session_ID}.pt` contains:
 
 ```python
 {
     "session_ID":       str,
     "speaker_id":       str,
     "partner_id":       str,
-    "speaker":          str,                  # speaker_label の値
-    "first_speaker":    str,                  # 会話の最初の発話者
-    "text_embeddings":  Tensor[n_utts, 768],  # Sentence-T5-large（L2 正規化）
-    "audio_embeddings": Tensor[n_utts, 1024], # HuBERT-large（L2 正規化）
-    "score":            float,                # 予測対象スコア
+    "speaker":          str,                  # value of speaker_label
+    "first_speaker":    str,                  # speaker of the first utterance
+    "text_embeddings":  Tensor[n_utts, 768],  # Sentence-T5-large (L2-normalized)
+    "audio_embeddings": Tensor[n_utts, 1024], # HuBERT-large (L2-normalized)
+    "score":            float,                # target score
 }
 ```
 
 ---
 
-## Step 3: モデル学習・評価
+## Step 3: Model Training & Evaluation
 
-LOSO CV でテキスト・音声・Late Fusion の 3 モダリティを評価する。
+Evaluates text, audio, and Late Fusion modalities with LOSO CV.
 
 ```bash
 python src/main.py [options]
 ```
 
-### オプション
+### Options
 
-| 引数 | デフォルト | 説明 |
-|------|-----------|------|
-| `--target` | `score` | `.pt` ファイル内の予測対象キー |
-| `--emb-dir` | `./data/preprocessed` | `.pt` 埋め込みファイルのディレクトリ |
-| `--out-dir` | `./log/inference` | 結果出力ディレクトリ |
-| `--lr` | `0.001` | 学習率 |
-| `--patience` | `20` | Early Stopping patience（エポック数） |
-| `--batch-size` | `6` | バッチあたりのセッション数 |
-| `--max-epochs` | `500` | 最大学習エポック数 |
-| `--verbose` | `False` | エポックごとの訓練ログを表示 |
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--target` | `score` | Key of the prediction target in `.pt` files |
+| `--emb-dir` | `./data/preprocessed` | Directory containing `.pt` embedding files |
+| `--out-dir` | `./log/inference` | Output directory for results |
+| `--lr` | `0.001` | Learning rate |
+| `--patience` | `20` | Early stopping patience (epochs) |
+| `--batch-size` | `6` | Number of sessions per batch |
+| `--max-epochs` | `500` | Maximum training epochs |
+| `--verbose` | `False` | Print per-epoch training logs |
 
-### 実行例
+### Examples
 
 ```bash
-# デフォルト設定
+# Default settings
 python src/main.py
 
-# ターゲット・ハイパーパラメータ指定
+# Custom target and hyperparameters
 python src/main.py --target rapport --lr 0.0005 --patience 30 --verbose
 ```
 
-### 出力
+### Output
 
-`log/inference/exp_{n}/` に以下を保存:
+Saved under `log/inference/exp_{n}/`:
 
-| ファイル | 内容 |
-|---------|------|
-| `config.txt` | 実行時設定（タイムスタンプ・ハイパーパラメータ） |
-| `results_text_only.csv` | テキストモデルの予測結果（全 fold） |
-| `results_audio_only.csv` | 音声モデルの予測結果（全 fold） |
-| `results_late_fusion.csv` | Late Fusion の予測結果（全 fold） |
-| `scatter_predictions.png` | y_true vs y_pred 散布図（3 モダリティ） |
-| `result.txt` | 全 fold 集計の最終評価指標（MAE / Pearson r / CCC） |
+| File | Contents |
+|------|----------|
+| `config.txt` | Run configuration (timestamp & hyperparameters) |
+| `results_text_only.csv` | Text model predictions (all folds) |
+| `results_audio_only.csv` | Audio model predictions (all folds) |
+| `results_late_fusion.csv` | Late Fusion predictions (all folds) |
+| `scatter_predictions.png` | y_true vs y_pred scatter plots (3 modalities) |
+| `result.txt` | Final evaluation metrics aggregated over all folds (MAE / Pearson r / CCC) |
 
 ---
 
-## トイデータ生成（動作確認用）
+## Toy Dataset Generation (for sanity checks)
 
-実データなしで動作を確認するためのトイデータセット（30 セッション）を生成する。
+Generates a toy dataset (30 sessions) to verify the pipeline without real data.
 
 ```bash
 python src/temp.py make_toy_dataset \
@@ -157,34 +159,34 @@ python src/temp.py make_toy_dataset \
   --seed       42
 ```
 
-生成された `.pt` ファイルは `--emb-dir` に指定して `main.py` で使用できる:
+The generated `.pt` files can be passed to `main.py` via `--emb-dir`:
 
 ```bash
 python src/main.py --emb-dir data/toy
 ```
 
-**設計**: テキスト・音声埋め込みの先頭 32 次元に `true_score × 6.0` のバイアスを加えて L2 正規化することで、モデルが学習できる信号を埋め込んでいる。
+**Design**: A learnable signal is embedded by adding a bias of `true_score × 6.0` to the first 32 dimensions of both text and audio embeddings, followed by L2 normalization.
 
 ---
 
-## ディレクトリ構成
+## Directory Structure
 
 ```
 proj-general-est-conv/
 ├── data/
-│   ├── pairs.csv            # ペア・スコア情報
-│   ├── transcript/          # 書き起こし CSV
-│   ├── audio/               # 話者別 WAV ファイル
-│   ├── preprocessed/        # .pt 埋め込みファイル（Step 2 で生成）
-│   └── toy/                 # トイデータ .pt ファイル（temp.py で生成）
+│   ├── pairs.csv            # Pair and score information
+│   ├── transcript/          # Transcript CSVs
+│   ├── audio/               # Per-speaker WAV files
+│   ├── preprocessed/        # .pt embedding files (generated in Step 2)
+│   └── toy/                 # Toy .pt files (generated by temp.py)
 ├── log/
-│   └── inference/           # 予測結果（Step 3 で生成）
+│   └── inference/           # Prediction results (generated in Step 3)
 ├── src/
-│   ├── preprocessing.py     # 特徴量抽出（Step 2）
-│   ├── main.py              # 学習・評価メインスクリプト（Step 3）
-│   ├── training.py          # モデル定義・訓練ループ
-│   ├── inference.py         # 推論・Late Fusion
+│   ├── preprocessing.py     # Feature extraction (Step 2)
+│   ├── main.py              # Training & evaluation main script (Step 3)
+│   ├── training.py          # Model definition & training loop
+│   ├── inference.py         # Inference & Late Fusion
 │   ├── evaluation_metrics.py
-│   └── temp.py              # トイデータ生成ユーティリティ
+│   └── temp.py              # Toy dataset generation utility
 └── requirements.txt
 ```
